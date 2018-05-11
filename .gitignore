@@ -1,0 +1,42 @@
+# Compiled source #
+###################
+out/*
+bin/*
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Logs and databases #
+######################
+*.log
+*.sql
+*.sqlite
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE config #
+##############
+.idea/*
+*.iml
+src/META-INF/*
+.project
+.classpath
+
+# Project handouts #
+####################
+docs/*
+*.pdf
+*.htm
+*.txt
+/bin/

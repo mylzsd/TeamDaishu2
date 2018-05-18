@@ -24,7 +24,7 @@ public class Listener extends Thread{
 	@Override
 	public void run() {
 		log.info("listening for new connections on " + portnum);
-		while (!term) {
+		while (!term && Control.getInstance().initialized()) {
 			Socket clientSocket;
 			try {
 				clientSocket = serverSocket.accept();

@@ -30,7 +30,6 @@ public class Connection extends Thread {
 	private boolean term = false;
 
 	private boolean mainConnection;
-	private Sender instantSender;
     private Sender verifySender;
 
 	// Type of connection, 0 - undefined, 1 - with a server, 2 - with a client
@@ -49,7 +48,6 @@ public class Connection extends Thread {
 	    mainConnection = false;
         authenticated = false;
         verifySender = new Sender(this, 10 * 1000);
-        instantSender = new Sender(this, 0);
         start();
 	}
 	
@@ -70,8 +68,6 @@ public class Connection extends Thread {
 			log.info("closing connection " + Settings.socketAddress(socket));
 			try {
 				term = true;
-                instantSender.setTerm(true);
-                instantSender.interrupt();
                 verifySender.setTerm(true);
                 verifySender.interrupt();
 				inreader.close();
@@ -159,13 +155,13 @@ public class Connection extends Thread {
 
 class Sender extends Thread {
     private static final Logger log = LogManager.getLogger();
-    private Connection con;
+    private Connection connection;
     private String socketId;
     private boolean term;
     private int interval;
 
     Sender(Connection con, int interval) {
-        this.con = con;
+        connection = con;
         socketId = con.getSocketId();
         term = false;
         this.interval = interval;
@@ -173,50 +169,29 @@ class Sender extends Thread {
     }
 
     public void run() {
-        log.debug("starting " + (interval == 0 ? "instant" : "verify") + " sender process");
+        log.debug("starting verify sender process...");
         while (!term) {
-            // do not use queue system for client
-            if (con.getType() != 1 || !con.isAuthenticated()) continue;
-            String key = con.isMainConnection() ? "main_connection" : socketId;
-            if (interval == 0) { // this is an instant sender
-                term = instantSend(key);
+            try {
+                Thread.sleep(interval);
+            } catch (InterruptedException e) {
+                log.info("received an interrupt during sleep");
+                term = true;
             }
-            else { // this is a verify sender
-                term = verifySend(key);
+            // do not use queue system for client
+            if (connection.getType() != 1 || !connection.isAuthenticated()) continue;
+            String key = connection.isMainConnection() ? "main_connection" : socketId;
+            ArrayList<JSONObject> list = Control.getInstance().getVerifyMsgList(key);
+            if (list == null || list.size() == 0) continue;
+            log.debug("resending activity messages...");
+            for (int i = 0; i < list.size(); i++) {
+                JSONObject obj = list.get(i);
+                if (connection.writeMsg(obj.toString())) {
+                    term = true;
+                    break;
+                }
             }
         }
         log.debug("sender process terminating");
-    }
-
-    private boolean instantSend(String key) {
-        JSONObject msgInfo = Control.getInstance().getInstantMessage(key);
-        if (msgInfo == null) return false;
-        // skip this message if the target party has a different type with this connection
-        String type = (String) msgInfo.get("type");
-        if (type.equals("ACTIVITY_BROADCAST")) {
-            Control.getInstance().addVerifyMsg(key, msgInfo);
-        }
-        // if writeMsg returns false then the connection is closed
-        if (!con.writeMsg(msgInfo.get("message").toString())) return true;
-        return false;
-    }
-
-    private boolean verifySend(String key) {
-        JSONObject msgInfo;
-        ArrayList<JSONObject> list = Control.getInstance().getVerifyMsgList(key);
-        if (list == null || list.size() == 0) return false;
-        log.debug("resending activity messages...");
-        for (int i = 0; i < list.size(); i++) {
-            msgInfo = list.get(i);
-            if (!con.writeMsg(msgInfo.get("message").toString())) return true;
-        }
-        try {
-            Thread.sleep(interval);
-        } catch (InterruptedException e) {
-            log.info("received an interrupt during sleep");
-            return true;
-        }
-        return false;
     }
 
     public void setTerm(boolean t) {

@@ -59,7 +59,6 @@ public class Control extends Thread {
     private static Map<String, Connection> loginMap;
 
 	// message queue table
-    private static Map<String, Queue<JSONObject>> instantMsgQueueMap;
     private static Map<String, ArrayList<JSONObject>> verifyMsgQueueMap;
 
     // message history
@@ -80,10 +79,7 @@ public class Control extends Thread {
         serverInfo = new HashMap<>();
         registerMap = new HashMap<>();
         loginMap = new HashMap<>();
-        instantMsgQueueMap = new HashMap<>();
-        instantMsgQueueMap.put("main_connection", new LinkedList<>());
         verifyMsgQueueMap = new HashMap<>();
-        verifyMsgQueueMap.put("main_connection", new ArrayList<>());
         messageHistory = new HashMap<>();
         if (Settings.getRemoteHostname() == null) serverType = 0;
 		// start a listener
@@ -193,7 +189,6 @@ public class Control extends Thread {
                     backupHostname = null;
                     backupPort = 0;
                 }
-                instantMsgQueueMap.remove(con.getSocketId());
                 verifyMsgQueueMap.remove(con.getSocketId());
                 return true;
             case "STILL_ALIVE":
@@ -205,7 +200,6 @@ public class Control extends Thread {
                 return login(con, requestObj);
             case "LOGOUT":
             	con.setAuthenticated(false);
-                instantMsgQueueMap.remove(con.getSocketId());
                 verifyMsgQueueMap.remove(con.getSocketId());
                 return true;
             case "ACTIVITY_MESSAGE":
@@ -239,7 +233,6 @@ public class Control extends Thread {
         }
         String type = (String) obj.get("type");
         con.setAuthenticated(true);
-        log.debug("is authenticated " + con.isAuthenticated());
         switch (type) {
             case "backupserver":
                 serverType = 1;
@@ -328,7 +321,6 @@ public class Control extends Thread {
             return true;
         }
         JSONObject responseObj = new JSONObject();
-        JSONObject msgInfo = new JSONObject();
         String username = (String) obj.get("username");
         String secret = (String) obj.get("secret");
         int verify = userVerify(username, secret);
@@ -347,9 +339,7 @@ public class Control extends Thread {
                 responseObj.put("username", username);
                 responseObj.put("secret", secret);
                 responseObj.put("key", obj.get("key"));
-                msgInfo.put("type", "LOGIN_DENY");
-                msgInfo.put("message", responseObj);
-                instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+                con.writeMsg(responseObj.toString());
                 return false;
         }
         // login allowed
@@ -358,9 +348,7 @@ public class Control extends Thread {
         responseObj.put("username", username);
         responseObj.put("secret", secret);
         responseObj.put("key", obj.get("key"));
-        msgInfo.put("type", "LOGIN_ALLOWED");
-        msgInfo.put("message", responseObj);
-        instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+        con.writeMsg(responseObj.toString());
         // check other servers' load and redirect
         String minHostname = null;
         int minPort = 0;
@@ -372,7 +360,6 @@ public class Control extends Thread {
                 min = si.clientLoad;
             }
         }
-        msgInfo.put("type", "REDIRECT");
         responseObj.clear();
         responseObj.put("command", "REDIRECT");
         responseObj.put("username", username);
@@ -381,15 +368,13 @@ public class Control extends Thread {
             // redirect to another central server
             responseObj.put("hostname", Settings.getRemoteHostname());
             responseObj.put("port", Settings.getRemotePort());
-            msgInfo.put("message", responseObj);
-            instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+            con.writeMsg(responseObj.toString());
         }
         else if (min < clientload * 4 && minHostname != null && minPort != 0) {
             // redirect to sub-server
             responseObj.put("hostname", minHostname);
             responseObj.put("port", minPort);
-            msgInfo.put("message", responseObj);
-            instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+            con.writeMsg(responseObj.toString());
         }
         return false;
     }
@@ -600,16 +585,12 @@ public class Control extends Thread {
                             outObj.put("hostname", Settings.getRemoteHostname());
                             outObj.put("port", Settings.getRemotePort());
                             outObj.put("type", "backup");
-                            JSONObject msgInfo = new JSONObject();
-                            msgInfo.put("type", "SERVER_REDIRECT");
-                            msgInfo.put("message", outObj);
-                            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                            c.writeMsg(outObj.toString());
                         }
                     }
                 }
             }
             con.setAuthenticated(true);
-            log.debug("is authenticated " + con.isAuthenticated());
             return false;
         }
     }
@@ -668,32 +649,25 @@ public class Control extends Thread {
         String key = obj.toString();
         JSONObject prevAnswer = messageHistory.get(key);
         if (prevAnswer != null) {
-            instantMsgQueueMap.get(con.getSocketId()).offer(prevAnswer);
+            con.writeMsg(prevAnswer.toString());
             return false;
         }
         // broadcast to all connection, including servers and clients except source, if the message is correct
         for (Connection c : connections) {
             if (c.equals(con)) continue;
             if (c.getType() == 1) {
-                // use message queue system for server
-                JSONObject msgInfo = new JSONObject();
-                msgInfo.put("type", "ACTIVITY_BROADCAST");
-                msgInfo.put("message", obj);
-                instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                // use message verify system for server;
+                verifyMsgQueueMap.get(c.getSocketId()).add(obj);
             }
-            else {
-                // simply send to client
-                c.writeMsg(obj.toString());
-            }
+            // simply send to client
+            c.writeMsg(obj.toString());
         }
         // put the receipt into history and send receipt back
         JSONObject responseObj = new JSONObject();
         responseObj.put("command", "ACTIVITY_RECEIPT");
         responseObj.put("activity", obj);
-        JSONObject msgInfo = new JSONObject();
-        msgInfo.put("type", "ACTIVITY_RECEIPT");
-        instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
-        messageHistory.put(key, msgInfo);
+        con.writeMsg(responseObj.toString());
+        messageHistory.put(key, responseObj);
         return false;
     }
 
@@ -760,13 +734,11 @@ public class Control extends Thread {
             // Store user's information in central servers regardless the result of lock request.
             userInfo.put(username, secret);
         }
-        JSONObject msgInfo = new JSONObject();
 	    // if this request is from a central server, simply response, otherwise lock request to another central server
         if (con.equals(mainConnection)) {
             responseObj.put("command", "LOCK_ALLOWED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
-            msgInfo.put("type", "LOCK_ALLOWED");
         }
         else {
             // Send lock request to main server
@@ -774,11 +746,10 @@ public class Control extends Thread {
             requestObj.put("command", "LOCK_REQUEST");
             requestObj.put("username", username);
             requestObj.put("secret", secret);
-            msgInfo.put("type", "LOCK_REQUEST");
             registerMap.put(username, con);
         }
-        msgInfo.put("message", responseObj);
-        instantMsgQueueMap.get("main_connection").offer(msgInfo);
+        if (mainConnection != null)
+            mainConnection.writeMsg(responseObj.toString());
 	    return false;
     }
 
@@ -809,15 +780,12 @@ public class Control extends Thread {
                 return true;
         }
         Connection c = registerMap.remove(username);
-        JSONObject msgInfo = new JSONObject();
         // Send lock allowed to server, and register success to client.
         if (c.getType() == 1) {
             responseObj.put("command", "LOCK_ALLOWED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
-            msgInfo.put("type", "LOCK_ALLOWED");
-            msgInfo.put("message", responseObj);
-            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+            c.writeMsg(responseObj.toString());
         }
         else {
             responseObj.put("command", "REGISTER_SUCCESS");
@@ -858,15 +826,12 @@ public class Control extends Thread {
             userInfo.remove(username);
         }
         Connection c = registerMap.remove(username);
-        JSONObject msgInfo = new JSONObject();
         // Send lock denied to server, and register failed to client.
         if (c.getType() == 1) {
             responseObj.put("command", "LOCK_DENIED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
-            msgInfo.put("type", "LOCK_DENIED");
-            msgInfo.put("message", responseObj);
-            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+            c.writeMsg(responseObj.toString());
         }
         else {
             responseObj.put("command", "REGISTER_FAILED");
@@ -924,10 +889,8 @@ public class Control extends Thread {
         requestObj.put("command", "LOCK_REQUEST");
         requestObj.put("username", username);
         requestObj.put("secret", secret);
-        JSONObject msgInfo = new JSONObject();
-        msgInfo.put("type", "LOCK_REQUEST");
-        msgInfo.put("message", requestObj);
-        instantMsgQueueMap.get("main_connection").offer(msgInfo);
+        if (mainConnection != null)
+            mainConnection.writeMsg(requestObj.toString());
         registerMap.put(username, con);
         return false;
     }
@@ -965,10 +928,8 @@ public class Control extends Thread {
             requestObj.put("username", username);
             requestObj.put("secret", secret);
             requestObj.put("key", con.getSocketId());
-            JSONObject msgInfo = new JSONObject();
-            msgInfo.put("type", "LOGIN_REQUEST");
-            msgInfo.put("message", requestObj);
-            instantMsgQueueMap.get("main_connection").offer(msgInfo);
+            if (mainConnection != null)
+                mainConnection.writeMsg(requestObj.toString());
             loginMap.put(username + con.getSocketId(), con);
             return false;
         }
@@ -1069,18 +1030,17 @@ public class Control extends Thread {
         // get current system time and put it in message
         String time = Long.toString(System.currentTimeMillis());
         responseObj.put("time", time);
+        if (serverType == 2 && mainConnection != null) {
+            mainConnection.writeMsg(responseObj.toString());
+            verifyMsgQueueMap.get("main_connection").add(responseObj);
+        }
         for (Connection c : connections) {
             if (c.getType() == 1) {
-                // use message queue system for server
-                JSONObject msgInfo = new JSONObject();
-                msgInfo.put("type", "ACTIVITY_BROADCAST");
-                msgInfo.put("message", responseObj);
-                instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                // use message verify system for server
+                verifyMsgQueueMap.get(c.getSocketId()).add(responseObj);
             }
-            else {
-                // simply send to client
-                c.writeMsg(responseObj.toString());
-            }
+            // simply send to client
+            c.writeMsg(responseObj.toString());
         }
 	    return false;
     }
@@ -1132,7 +1092,6 @@ public class Control extends Thread {
 	public synchronized Connection incomingConnection(Socket s) throws IOException {
 		log.debug("incoming connection: " + Settings.socketAddress(s));
 		Connection c = new Connection(s);
-		instantMsgQueueMap.put(Settings.socketAddress(s), new LinkedList<>());
         verifyMsgQueueMap.put(Settings.socketAddress(s), new ArrayList<>());
 		connections.add(c);
 		return c;
@@ -1144,20 +1103,11 @@ public class Control extends Thread {
 	public synchronized Connection outgoingConnection(Socket s) throws IOException{
 		log.debug("outgoing connection: " + Settings.socketAddress(s));
 		Connection c = new Connection(s);
-        instantMsgQueueMap.put(Settings.socketAddress(s), new LinkedList<>());
         verifyMsgQueueMap.put(Settings.socketAddress(s), new ArrayList<>());
 		c.setType(1);
 		serverload++;
 		return c;
 	}
-
-    /**
-     * Poll the first element of the instant message queue if found by given socket id
-     */
-    public JSONObject getInstantMessage(String key) {
-        Queue q = instantMsgQueueMap.get(key);
-        return q == null ? null : ((JSONObject) q.poll());
-    }
 
     /**
      * Get the entire verify message list associates to given socket id
@@ -1274,26 +1224,20 @@ public class Control extends Thread {
                 log.error("failed to setup backup server, retry in 5 seconds");
             }
         }
-        JSONObject msgInfo = new JSONObject();
-	    msgInfo.put("type", "SERVER_ANNOUNCE");
-	    msgInfo.put("message", outObj);
 	    if (mainConnection != null) {
-	        instantMsgQueueMap.get("main_connection").offer(msgInfo);
+	        mainConnection.writeMsg(outObj.toString());
         }
 	    if (serverType == 2 && backupConnection != null) {
-            instantMsgQueueMap.get(backupConnection.getSocketId()).offer(msgInfo);
+	        backupConnection.writeMsg(outObj.toString());
         }
         // central servers announce to sub-servers that they are still alive
         // used to pass timeout check
         if (serverType == 0 || serverType == 1) {
             outObj.clear();
-            msgInfo.clear();
             outObj.put("command", "STILL_ALIVE");
-            msgInfo.put("type", "STILL_ALIVE");
-            msgInfo.put("message", outObj);
             for (Connection c : connections) {
                 if (c.getType() == 1) {
-                    instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                    c.writeMsg(outObj.toString());
                 }
             }
         }

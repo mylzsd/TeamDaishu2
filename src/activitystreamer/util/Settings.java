@@ -10,12 +10,12 @@ import org.apache.logging.log4j.Logger;
 public class Settings {
 	private static final Logger log = LogManager.getLogger();
 	private static SecureRandom random = new SecureRandom();
-	private static int localPort = 3780;
+	private static int localPort = 3781;
 	private static String localHostname = "localhost";
-	private static String remoteHostname = null;
+	private static String remoteHostname = "localhost";
 	private static int remotePort = 3780;
 	private static int activityInterval = 5000; // milliseconds
-	private static String secret = null;
+	private static String secret = "gfji5ng9vm567jlaekff91hfj0";
 	private static String username = "user1";
 
 	

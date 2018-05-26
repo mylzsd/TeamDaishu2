@@ -17,7 +17,6 @@ public class Listener extends Thread{
 	
 	public Listener() throws IOException{
 		portnum = Settings.getLocalPort(); // keep our own copy in case it changes later
-        log.debug("port number: " + portnum);
 		serverSocket = new ServerSocket(portnum);
 		start();
 	}
@@ -25,7 +24,7 @@ public class Listener extends Thread{
 	@Override
 	public void run() {
 		// wait until server receive its type from remote server
-		while (Control.control != null && Control.control.initialized());
+		while (Control.control != null && !Control.control.initialized());
         log.info("listening for new connections on " + portnum);
 		while (!term) {
 			Socket clientSocket;

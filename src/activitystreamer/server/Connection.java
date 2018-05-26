@@ -36,7 +36,7 @@ public class Connection extends Thread {
 	// Type of connection, 0 - undefined, 1 - with a server, 2 - with a client
 	private int type = 0;
 	// Whether this connection is authenticated
-	private boolean authenticated = false;
+	private boolean authenticated;
 	
 	Connection(Socket socket) throws IOException {
 		in = new DataInputStream(socket.getInputStream());
@@ -44,9 +44,10 @@ public class Connection extends Thread {
 	    inreader = new BufferedReader( new InputStreamReader(in));
 	    outwriter = new PrintWriter(out, true);
 	    this.socket = socket;
-	    this.socket.setSoTimeout(10 * 1000);
+	    this.socket.setSoTimeout(15 * 1000);
 	    open = true;
 	    mainConnection = false;
+        authenticated = false;
         verifySender = new Sender(this, 10 * 1000);
         instantSender = new Sender(this, 0);
         start();
@@ -172,12 +173,10 @@ class Sender extends Thread {
     }
 
     public void run() {
-        // wait until the connection is authenticated
-        while (!con.isAuthenticated());
         log.debug("starting " + (interval == 0 ? "instant" : "verify") + " sender process");
         while (!term) {
             // do not use queue system for client
-            if (con.getType() != 1) continue;
+            if (con.getType() != 1 || !con.isAuthenticated()) continue;
             String key = con.isMainConnection() ? "main_connection" : socketId;
             if (interval == 0) { // this is an instant sender
                 term = instantSend(key);
@@ -203,9 +202,10 @@ class Sender extends Thread {
     }
 
     private boolean verifySend(String key) {
-        log.debug("resending activity messages...");
         JSONObject msgInfo;
         ArrayList<JSONObject> list = Control.getInstance().getVerifyMsgList(key);
+        if (list == null || list.size() == 0) return false;
+        log.debug("resending activity messages...");
         for (int i = 0; i < list.size(); i++) {
             msgInfo = list.get(i);
             if (!con.writeMsg(msgInfo.get("message").toString())) return true;

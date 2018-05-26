@@ -81,7 +81,9 @@ public class Control extends Thread {
         registerMap = new HashMap<>();
         loginMap = new HashMap<>();
         instantMsgQueueMap = new HashMap<>();
+        instantMsgQueueMap.put("main_connection", new LinkedList<>());
         verifyMsgQueueMap = new HashMap<>();
+        verifyMsgQueueMap.put("main_connection", new ArrayList<>());
         messageHistory = new HashMap<>();
         if (Settings.getRemoteHostname() == null) serverType = 0;
 		// start a listener
@@ -142,6 +144,7 @@ public class Control extends Thread {
             invalidMessage(con, "the message sent was not a valid json object");
             return true;
         }
+        log.debug("receiving command " + command);
         // process different commands
         switch (command) {
 	        /* Server communication part */
@@ -236,6 +239,7 @@ public class Control extends Thread {
         }
         String type = (String) obj.get("type");
         con.setAuthenticated(true);
+        log.debug("is authenticated " + con.isAuthenticated());
         switch (type) {
             case "backupserver":
                 serverType = 1;
@@ -540,7 +544,6 @@ public class Control extends Thread {
         }
         else {
             con.setType(1);
-            serverload++;
             if (type.equals("main")) {
                 // only redirect request for a main server
                 if (centralSI != null && serverload > centralSI.serverLoad + 5) {
@@ -552,6 +555,7 @@ public class Control extends Thread {
                     con.writeMsg(responseObj.toString());
                     return true;
                 }
+                serverload++;
                 boolean redirectNeeded = false;
                 responseObj.put("command", "AUTHENTICATE_SUCCESS");
                 String host = (String) obj.get("hostname");
@@ -563,6 +567,7 @@ public class Control extends Thread {
                     log.info(String.format("Backup server hostname: %s, port: %d", host, port));
                     connections.remove(con);
                     mainConnection = con;
+                    con.setMainConnection(true);
                     responseObj.put("type", "backupserver");
                     JSONObject userInfoDup = new JSONObject();
                     userInfoDup.putAll(userInfo);
@@ -574,6 +579,7 @@ public class Control extends Thread {
                     // this is the previous backup server
                     connections.remove(con);
                     mainConnection = con;
+                    con.setMainConnection(true);
                     responseObj.put("type", "backupserver");
                     JSONObject userInfoDup = new JSONObject();
                     userInfoDup.putAll(userInfo);
@@ -603,6 +609,7 @@ public class Control extends Thread {
                 }
             }
             con.setAuthenticated(true);
+            log.debug("is authenticated " + con.isAuthenticated());
             return false;
         }
     }
@@ -1084,6 +1091,7 @@ public class Control extends Thread {
 	public synchronized void connectionClosed(Connection con, boolean partition) {
 		if (term) return;
 		if (con.equals(mainConnection)) {
+		    serverload--;
             mainConnection = null;
             centralSI = null;
             if (serverType == 1 && !partition) {
@@ -1107,6 +1115,7 @@ public class Control extends Thread {
             }
         }
         else if (con.equals(backupConnection)) {
+		    serverload--;
             backupConnection = null;
         }
         else {
@@ -1138,6 +1147,7 @@ public class Control extends Thread {
         instantMsgQueueMap.put(Settings.socketAddress(s), new LinkedList<>());
         verifyMsgQueueMap.put(Settings.socketAddress(s), new ArrayList<>());
 		c.setType(1);
+		serverload++;
 		return c;
 	}
 
@@ -1268,7 +1278,7 @@ public class Control extends Thread {
 	    msgInfo.put("type", "SERVER_ANNOUNCE");
 	    msgInfo.put("message", outObj);
 	    if (mainConnection != null) {
-	        instantMsgQueueMap.get(mainConnection.getSocketId()).offer(msgInfo);
+	        instantMsgQueueMap.get("main_connection").offer(msgInfo);
         }
 	    if (serverType == 2 && backupConnection != null) {
             instantMsgQueueMap.get(backupConnection.getSocketId()).offer(msgInfo);

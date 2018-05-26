@@ -360,20 +360,29 @@ public class Control extends Thread {
                 min = si.clientLoad;
             }
         }
+        String hostname = (String) obj.get("hostname");
+        int port = ((Number) obj.get("port")).intValue();
         responseObj.clear();
         responseObj.put("command", "REDIRECT");
         responseObj.put("username", username);
         responseObj.put("key", obj.get("key"));
-        if (centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
+        if (centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
             // redirect to another central server
             responseObj.put("hostname", Settings.getRemoteHostname());
             responseObj.put("port", Settings.getRemotePort());
             con.writeMsg(responseObj.toString());
         }
         else if (min < clientload * 4 && minHostname != null && minPort != 0) {
-            // redirect to sub-server
-            responseObj.put("hostname", minHostname);
-            responseObj.put("port", minPort);
+            if (!minHostname.equals(hostname) || minPort != port) {
+                // redirect to sub-server
+                responseObj.put("hostname", minHostname);
+                responseObj.put("port", minPort);
+                con.writeMsg(responseObj.toString());
+            }
+        }
+        else {
+            responseObj.put("hostname", Settings.getLocalHostname());
+            responseObj.put("port", Settings.getLocalPort());
             con.writeMsg(responseObj.toString());
         }
         return false;
@@ -928,6 +937,8 @@ public class Control extends Thread {
             requestObj.put("username", username);
             requestObj.put("secret", secret);
             requestObj.put("key", con.getSocketId());
+            requestObj.put("hostname", Settings.getLocalHostname());
+            requestObj.put("port", Settings.getLocalPort());
             if (mainConnection != null)
                 mainConnection.writeMsg(requestObj.toString());
             loginMap.put(username + con.getSocketId(), con);
@@ -966,7 +977,7 @@ public class Control extends Thread {
             }
             responseObj.clear();
             responseObj.put("command", "REDIRECT");
-            if (centralSI != null && centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
+            if (centralSI != null && centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
                 // redirect to another central server
                 responseObj.put("hostname", Settings.getRemoteHostname());
                 responseObj.put("port", Settings.getRemotePort());

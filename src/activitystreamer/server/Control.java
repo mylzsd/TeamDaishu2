@@ -366,13 +366,13 @@ public class Control extends Thread {
         responseObj.put("command", "REDIRECT");
         responseObj.put("username", username);
         responseObj.put("key", obj.get("key"));
-        if (centralSI.clientLoad < clientload - 3 && (centralSI.clientLoad + 1) * 4 < min) {
+        if (centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
             // redirect to another central server
             responseObj.put("hostname", Settings.getRemoteHostname());
             responseObj.put("port", Settings.getRemotePort());
             con.writeMsg(responseObj.toString());
         }
-        else if (min < (clientload + 1) * 4 && minHostname != null && minPort != 0) {
+        else if (min < clientload * 4 && minHostname != null && minPort != 0) {
             if (sourceSI.clientLoad > min + 2) {
                 // redirect to sub-server
                 responseObj.put("hostname", minHostname);
@@ -760,10 +760,9 @@ public class Control extends Thread {
         }
         else {
             // Send lock request to main server
-            JSONObject requestObj = new JSONObject();
-            requestObj.put("command", "LOCK_REQUEST");
-            requestObj.put("username", username);
-            requestObj.put("secret", secret);
+            responseObj.put("command", "LOCK_REQUEST");
+            responseObj.put("username", username);
+            responseObj.put("secret", secret);
             registerMap.put(username, con);
         }
         if (mainConnection != null)
@@ -986,14 +985,14 @@ public class Control extends Thread {
             }
             responseObj.clear();
             responseObj.put("command", "REDIRECT");
-            if (centralSI != null && centralSI.clientLoad < clientload - 3 && (centralSI.clientLoad + 1) * 4 < min) {
+            if (centralSI != null && centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
                 // redirect to another central server
                 responseObj.put("hostname", Settings.getRemoteHostname());
                 responseObj.put("port", Settings.getRemotePort());
                 con.writeMsg(responseObj.toString());
                 return true;
             }
-            else if (min < (clientload + 1) * 4 && minHostname != null && minPort != 0) {
+            else if (min < (clientload - 1) * 4 && minHostname != null && minPort != 0) {
                 // redirect to sub-server
                 responseObj.put("hostname", minHostname);
                 responseObj.put("port", minPort);

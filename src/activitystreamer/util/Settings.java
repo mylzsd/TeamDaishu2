@@ -10,13 +10,13 @@ import org.apache.logging.log4j.Logger;
 public class Settings {
 	private static final Logger log = LogManager.getLogger();
 	private static SecureRandom random = new SecureRandom();
-	private static int localPort = 3781;
+	private static int localPort = 3780;
 	private static String localHostname = "localhost";
-	private static String remoteHostname = "localhost";
+	private static String remoteHostname = null;
 	private static int remotePort = 3780;
 	private static int activityInterval = 5000; // milliseconds
-	private static String secret = "9e0j7els57ut76smc80hostpq4";
-	private static String username = "anonymous";
+	private static String secret = null;
+	private static String username = "user1";
 
 	
 	public static int getLocalPort() {

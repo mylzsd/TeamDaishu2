@@ -100,7 +100,7 @@ public class Server {
 		if (Settings.getSecret() == null) {
 		    // generate a secret if not exist
             String secret = Settings.nextSecret();
-            System.out.format("secret for this server is: %s\n", secret);
+            log.info(String.format("secret for this server is: %s\n", secret));
 			Settings.setSecret(secret);
 		}
 		

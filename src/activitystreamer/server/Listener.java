@@ -24,9 +24,9 @@ public class Listener extends Thread{
 	
 	@Override
 	public void run() {
-		log.info("listening for new connections on " + portnum);
 		// wait until server receive its type from remote server
 		while (Control.control != null && Control.control.initialized());
+        log.info("listening for new connections on " + portnum);
 		while (!term) {
 			Socket clientSocket;
 			try {

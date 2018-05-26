@@ -83,6 +83,7 @@ public class Control extends Thread {
         instantMsgQueueMap = new HashMap<>();
         verifyMsgQueueMap = new HashMap<>();
         messageHistory = new HashMap<>();
+        if (Settings.getRemoteHostname() == null) serverType = 0;
 		// start a listener
 		try {
             // start listener
@@ -116,9 +117,6 @@ public class Control extends Thread {
 				log.error("failed to setup main server, retry in 5 seconds");
 			}
 		}
-		else {
-		    serverType = 0;
-        }
 	}
 
     /**
@@ -911,6 +909,7 @@ public class Control extends Thread {
                 responseObj.put("command", "REGISTER_SUCCESS");
                 responseObj.put("info", String.format("register success for %s", username));
                 con.writeMsg(responseObj.toString());
+                return false;
             }
         }
         // Send lock request to main server
@@ -999,7 +998,7 @@ public class Control extends Thread {
             }
             responseObj.clear();
             responseObj.put("command", "REDIRECT");
-            if (centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
+            if (centralSI != null && centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
                 // redirect to another central server
                 responseObj.put("hostname", Settings.getRemoteHostname());
                 responseObj.put("port", Settings.getRemotePort());

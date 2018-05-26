@@ -186,7 +186,6 @@ class Sender extends Thread {
             for (int i = 0; i < list.size(); i++) {
                 JSONObject obj = list.get(i);
                 if (connection.writeMsg(obj.toString())) {
-                    term = true;
                     break;
                 }
             }

@@ -3,9 +3,7 @@ package activitystreamer.server;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketException;
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.HashMap;
+import java.util.*;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -26,12 +24,10 @@ public class Control extends Thread {
 	protected static Control control = null;
 
 	// fields for project2
-    // type of server, -1 undefined, 0 - MAIN server, 1 - BACKUP server, 2 - SUB server
+    // type of server, -1 - undefined, 0 - Alpha central server, 1 - Beta central server, 2 - SUB server
     private int serverType = -1;
     private String backupHostname = null;
     private int backupPort = -1;
-    private String centralHostname = null;
-    private int centralPort = -1;
     private int serverload = 0;
     private int clientload = 0;
     private static Connection mainConnection;
@@ -56,13 +52,23 @@ public class Control extends Thread {
     }
     // map server info with server id
     private static Map<String, ServerInfo> serverInfo;
+	private static ServerInfo centralSI;
 	// map awaiting lock request connection with requested username
-	private static Map<String, Connection> connectionMap;
+	private static Map<String, Connection> registerMap;
+	// map awaiting login request connection with requested username
+    private static Map<String, Connection> loginMap;
+
+	// message queue table
+    private static Map<String, Queue<JSONObject>> instantMsgQueueMap;
+    private static Map<String, ArrayList<JSONObject>> verifyMsgQueueMap;
+
+    // message history
+    private static Map<String, JSONObject> messageHistory;
 	
 	public static Control getInstance() {
 		if (control == null) {
 			control = new Control();
-		} 
+		}
 		return control;
 	}
 	
@@ -72,18 +78,22 @@ public class Control extends Thread {
 		// initialize local database
         userInfo = new HashMap<>();
         serverInfo = new HashMap<>();
-        connectionMap = new HashMap<>();
-        // build initial connection
-        initiateConnection();
+        registerMap = new HashMap<>();
+        loginMap = new HashMap<>();
+        instantMsgQueueMap = new HashMap<>();
+        verifyMsgQueueMap = new HashMap<>();
+        messageHistory = new HashMap<>();
 		// start a listener
 		try {
             // start listener
 			listener = new Listener();
+            // build initial connection
+            initiateConnection();
 		} catch (IOException e1) {
 			log.fatal("failed to startup a listening thread: " + e1);
 			System.exit(-1);
 		}
-		// start server announce thread
+		// start server activity thread
 		start();
 	}
 	
@@ -92,16 +102,18 @@ public class Control extends Thread {
 		if (Settings.getRemoteHostname() != null) {
 			try {
 				mainConnection = outgoingConnection(new Socket(Settings.getRemoteHostname(), Settings.getRemotePort()));
+				mainConnection.setMainConnection(true);
 				// Send authentication to remote host
                 JSONObject requestObj = new JSONObject();
                 requestObj.put("command", "AUTHENTICATE");
                 requestObj.put("secret", Settings.getSecret());
-                requestObj.put("interval", Settings.getActivityInterval());
+                requestObj.put("hostname", Settings.getLocalHostname());
+                requestObj.put("port", Settings.getLocalPort());
                 requestObj.put("type", "main");
                 mainConnection.writeMsg(requestObj.toString());
 			} catch (IOException e) {
-				log.error("failed to make connection to " + Settings.getRemoteHostname() + ":" + Settings.getRemotePort() + " :" + e);
-				System.exit(-1);
+			    mainConnection = null;
+				log.error("failed to setup main server, retry in 5 seconds");
 			}
 		}
 		else {
@@ -117,7 +129,7 @@ public class Control extends Thread {
      */
 	public synchronized boolean process(Connection con, String msg) {
 	    JSONObject requestObj;
-	    // basic format check
+	    // basic format checking
 	    String command;
 	    try {
 	        requestObj = (JSONObject) parser.parse(msg);
@@ -138,7 +150,8 @@ public class Control extends Thread {
             case "AUTHENTICATE":
                 return authenticate(con, requestObj);
             case "AUTHENTICATION_FAIL":
-                log.error(String.format("AUTHENTICATION_FAIL, %s", requestObj.get("info")));
+                log.error("authentication failed, running as a single server");
+                serverType = 0;
                 return true;
             case "INVALID_MESSAGE":
                 log.error(String.format("An invalid message is sent, %s", requestObj.get("info")));
@@ -156,17 +169,43 @@ public class Control extends Thread {
             /* new protocols for project 2 */
             case "AUTHENTICATE_SUCCESS":
                 return authenticateSuccess(con, requestObj);
+            case "SERVER_REDIRECT":
+                return serverRedirect(con, requestObj);
             case "LOGIN_REQUEST":
                 return loginRequest(con, requestObj);
+            case "LOGIN_ALLOWED":
+                return loginAllowed(con, requestObj);
+            case "LOGIN_DENY":
+                return loginDeny(con, requestObj);
+            case "REDIRECT":
+                return redirect(con, requestObj);
+            case "ACTIVITY_RECEIPT":
+                return activityReceipt(con, requestObj);
             case "SERVER_QUIT":
+                con.setAuthenticated(false);
+                if (con.equals(mainConnection)) {
+                    if (serverType == 1) serverType = 0;
+                    Settings.setRemoteHostname(null);
+                    Settings.setRemotePort(0);
+                }
+                else if (con.equals(backupConnection)) {
+                    backupHostname = null;
+                    backupPort = 0;
+                }
+                instantMsgQueueMap.remove(con.getSocketId());
+                verifyMsgQueueMap.remove(con.getSocketId());
                 return true;
+            case "STILL_ALIVE":
+                return false;
             /* Client part */
             case "REGISTER":
                 return register(con, requestObj);
             case "LOGIN":
                 return login(con, requestObj);
             case "LOGOUT":
-            	con.setLogin(false);
+            	con.setAuthenticated(false);
+                instantMsgQueueMap.remove(con.getSocketId());
+                verifyMsgQueueMap.remove(con.getSocketId());
                 return true;
             case "ACTIVITY_MESSAGE":
                 return activityMessage(con, requestObj);
@@ -198,15 +237,18 @@ public class Control extends Thread {
             return true;
         }
         String type = (String) obj.get("type");
+        con.setAuthenticated(true);
         switch (type) {
             case "backupserver":
-                centralHostname = con.getSocket().getInetAddress().getHostAddress();
-                centralPort = con.getSocket().getPort();
+                serverType = 1;
                 Map userInfoDup = (Map) obj.get("userinfo");
-                if (userInfoDup != null)
-                    userInfo = userInfoDup;
+                if (userInfoDup != null) {
+                    // put all rather than just assign
+                    userInfo.putAll(userInfoDup);
+                }
                 return false;
             case "subserver":
+                serverType = 2;
                 try {
                     backupHostname = (String) obj.get("pairedhost");
                     backupPort = ((Number) obj.get("pairedport")).intValue();
@@ -214,13 +256,12 @@ public class Control extends Thread {
                     JSONObject requestObj = new JSONObject();
                     requestObj.put("command", "AUTHENTICATE");
                     requestObj.put("secret", Settings.getSecret());
-                    requestObj.put("interval", Settings.getActivityInterval());
                     requestObj.put("type", "backup");
                     backupConnection.writeMsg(requestObj.toString());
                     return false;
                 } catch (Exception e) {
                     log.error("failed to start backup connection: " + e);
-                    return true;
+                    return false;
                 }
             default:
                 log.error("the message does not contain a valid server type");
@@ -229,32 +270,260 @@ public class Control extends Thread {
         }
     }
 
+    private boolean serverRedirect(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.error("received SERVER_REDIRECT from a non-server party");
+            invalidMessage(con, "received SERVER_REDIRECT from an unauthenticated server");
+            return true;
+        }
+        // authenticate to new server
+        String hostname = (String) obj.get("hostname");
+        int port = ((Number) obj.get("port")).intValue();
+        String type = (String) obj.get("type");
+        JSONObject requestObj = new JSONObject();
+        requestObj.put("command", "AUTHENTICATE");
+        requestObj.put("secret", Settings.getSecret());
+        requestObj.put("hostname", hostname);
+        requestObj.put("port", port);
+        if (type.equals("main")) {
+            // set target server as main server
+            Settings.setRemoteHostname(hostname);
+            Settings.setRemotePort(port);
+            try {
+                mainConnection = outgoingConnection(new Socket(hostname, port));
+                mainConnection.setMainConnection(true);
+                requestObj.put("type", "main");
+                mainConnection.writeMsg(requestObj.toString());
+            } catch (IOException e) {
+                log.error("failed to setup main server, retry in 5 seconds");
+            }
+            return true;
+        }
+        else {
+            // set target server as backup server
+            backupHostname = hostname;
+            backupPort = port;
+            try {
+                backupConnection = outgoingConnection(new Socket(hostname, port));
+                requestObj.put("type", "backup");
+                backupConnection.writeMsg(requestObj.toString());
+            } catch (IOException e) {
+                log.error("failed to setup backup server, retry in 5 seconds");
+            }
+            return false;
+        }
+    }
+
     private boolean loginRequest(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.error("received LOGIN_REQUEST from a non-server party");
+            invalidMessage(con, "received LOGIN_REQUEST from a non-server party");
+            return true;
+        }
+        if (serverType == 2) {
+            log.error("LOGIN_REQUEST is sent to a sub-server");
+            invalidMessage(con, "LOGIN_REQUEST is sent to a sub-server");
+            return true;
+        }
+        JSONObject responseObj = new JSONObject();
+        JSONObject msgInfo = new JSONObject();
+        String username = (String) obj.get("username");
+        String secret = (String) obj.get("secret");
+        int verify = userVerify(username, secret);
+        switch (verify) {
+            case 0: break;
+            case 1:
+                invalidMessage(con, "the message must contain non-null key username");
+                return true;
+            case 2:
+                invalidMessage(con, "the message must contain non-null key secret");
+                return true;
+            case 3:
+            case 4:
+                log.debug("username and secret do not match database record");
+                responseObj.put("command", "LOGIN_DENY");
+                responseObj.put("username", username);
+                responseObj.put("secret", secret);
+                responseObj.put("key", obj.get("key"));
+                msgInfo.put("type", "LOGIN_DENY");
+                msgInfo.put("message", responseObj);
+                instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+                return false;
+        }
+        // login allowed
+        log.debug("login request allowed for user " + username);
+        responseObj.put("command", "LOGIN_ALLOWED");
+        responseObj.put("username", username);
+        responseObj.put("secret", secret);
+        responseObj.put("key", obj.get("key"));
+        msgInfo.put("type", "LOGIN_ALLOWED");
+        msgInfo.put("message", responseObj);
+        instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+        // check other servers' load and redirect
+        String minHostname = null;
+        int minPort = 0;
+        int min = Integer.MAX_VALUE;
+        for (ServerInfo si : serverInfo.values()) {
+            if (si.clientLoad < min) {
+                minHostname = si.hostname;
+                minPort = si.port;
+                min = si.clientLoad;
+            }
+        }
+        msgInfo.put("type", "REDIRECT");
+        responseObj.clear();
+        responseObj.put("command", "REDIRECT");
+        responseObj.put("username", username);
+        responseObj.put("key", obj.get("key"));
+        if (centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
+            // redirect to another central server
+            responseObj.put("hostname", Settings.getRemoteHostname());
+            responseObj.put("port", Settings.getRemotePort());
+            msgInfo.put("message", responseObj);
+            instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+        }
+        else if (min < clientload * 4 && minHostname != null && minPort != 0) {
+            // redirect to sub-server
+            responseObj.put("hostname", minHostname);
+            responseObj.put("port", minPort);
+            msgInfo.put("message", responseObj);
+            instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+        }
+        return false;
+    }
+
+    private boolean loginAllowed(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.info("received LOGIN_ALLOWED from a non-server party");
+            invalidMessage(con, "received LOGIN_ALLOWED from a non-server party");
+            return true;
+        }
+        if (!con.equals(mainConnection)) {
+            log.info("received LOGIN_ALLOWED from an unauthorized server");
+            invalidMessage(con, "received LOGIN_ALLOWED from an unauthorized server");
+            return true;
+        }
+        String username = (String) obj.get("username");
+        String secret = (String) obj.get("secret");
+        int verify = userVerify(username, secret);
+        switch (verify) {
+            case 1:
+                invalidMessage(con, "the message must contain non-null key username");
+                return true;
+            case 2:
+                invalidMessage(con, "the message must contain non-null key secret");
+                return true;
+        }
+        // send login success to client
+        // do not remove due to potential redirection
+        log.debug("login allowed for user " + username);
+        String key = (String) obj.get("key");
+        Connection c = loginMap.get(username + key);
+        JSONObject responseObj = new JSONObject();
+        responseObj.put("command", "LOGIN_SUCCESS");
+        responseObj.put("info", String.format("logged in as user %s", username));
+        c.writeMsg(responseObj.toString());
+        c.setAuthenticated(true);
+        return false;
+    }
+
+    private boolean loginDeny(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.error("received LOCK_DENIED from a non-server party");
+            invalidMessage(con, "received LOCK_DENIED from a non-server party");
+            return true;
+        }
+        if (!con.equals(mainConnection)) {
+            log.error("received LOCK_DENIED from an unauthorized server");
+            invalidMessage(con, "received LOCK_DENIED from an unauthorized server");
+            return true;
+        }
+        JSONObject responseObj = new JSONObject();
+        String username = (String) obj.get("username");
+        String secret = (String) obj.get("secret");
+        int verify = userVerify(username, secret);
+        switch (verify) {
+            case 1:
+                invalidMessage(con, "the message must contain non-null key username");
+                return true;
+            case 2:
+                invalidMessage(con, "the message must contain non-null key secret");
+                return true;
+        }
+        // send login failed to client
+        log.debug("login failed for user " + username);
+        String key = (String) obj.get("key");
+        Connection c = loginMap.remove(username + key);
+        responseObj.put("command", "LOGIN_FAILED");
+        responseObj.put("info", "login request is denied by central server");
+        c.writeMsg(responseObj.toString());
+        c.setTerm(true);
+        return false;
+    }
+
+    private boolean redirect(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.error("received REDIRECT from a non-server party");
+            invalidMessage(con, "received REDIRECT from a non-server party");
+            return true;
+        }
+        if (!con.equals(mainConnection)) {
+            log.error("received REDIRECT from an unauthorized server");
+            invalidMessage(con, "received REDIRECT from an unauthorized server");
+            return true;
+        }
+        JSONObject responseObj = new JSONObject();
+        String username = (String) obj.get("username");
+        String key = (String) obj.get("key");
+        // send redirect to client
+        log.debug("user " + username + " needs to be redirected");
+        Connection c = loginMap.remove(username + key);
+        responseObj.put("command", "REDIRECT");
+        responseObj.put("hostname", obj.get("hostname"));
+        responseObj.put("port", obj.get("port"));
+        c.writeMsg(responseObj.toString());
+        c.setTerm(true);
+        return false;
+    }
+
+    private boolean activityReceipt(Connection con, JSONObject obj) {
+        if (con.getType() != 1) {
+            log.error("received ACTIVITY_RECEIPT from a non-server party");
+            invalidMessage(con, "received ACTIVITY_RECEIPT from an unauthenticated server");
+            return true;
+        }
+        String confirmed = obj.get("message").toString();
+        String key = con.equals(mainConnection) ? "main_connection" : con.getSocketId();
+        List<JSONObject> vList = verifyMsgQueueMap.get(key);
+        for (int i = 0; i < vList.size(); i++) {
+            String awaiting = vList.get(i).get("message").toString();
+            // remove activity message if it is confirmed to be received
+            if (confirmed.equals(awaiting)) {
+                vList.remove(i);
+                i--;
+            }
+        }
         return false;
     }
 
     /**
      * Process AUTHENTICATE request. Modified in project 2
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
      */
 	private boolean authenticate(Connection con, JSONObject obj) {
 	    // Only connection type 0 (new connection) should send this message
         if (con.getType() == 2) {
             log.error("received AUTHENTICATION from a client");
             invalidMessage(con, "Client should not send authentication request");
+            return true;
         }
         if (con.getType() == 1) {
             log.error("AUTHENTICATION is not the first message from this server");
             invalidMessage(con, "Authentication should be the first message");
-        }
-        if (serverType != 0 && serverType != 1) {
-            log.error("Authenticate to a non-central server");
-            invalidMessage(con, "Authenticate to a non-central server");
+            return true;
         }
         JSONObject responseObj = new JSONObject();
         String secret = (String) obj.get("secret");
+        String type = (String) obj.get("type");
         if (secret == null || !secret.equals(Settings.getSecret())) {
             log.error("the supplied secret is incorrect");
             responseObj.put("command", "AUTHENTICATION_FAIL");
@@ -262,45 +531,86 @@ public class Control extends Thread {
             con.writeMsg(responseObj.toString());
             return true;
         }
+        else if (serverType != 0 && serverType != 1) {
+            log.info("authenticate to a non-central server, redirect to my main server");
+            responseObj.put("command", "SERVER_REDIRECT");
+            responseObj.put("hostname", Settings.getRemoteHostname());
+            responseObj.put("port", Settings.getRemotePort());
+            responseObj.put("type", "main");
+            con.writeMsg(responseObj.toString());
+            return true;
+        }
         else {
             con.setType(1);
             serverload++;
-            String type = (String) obj.get("type");
             if (type.equals("main")) {
+                // only redirect request for a main server
+                if (centralSI != null && serverload > centralSI.serverLoad + 5) {
+                    log.info("load balancing, redirect to another central server");
+                    responseObj.put("command", "SERVER_REDIRECT");
+                    responseObj.put("hostname", Settings.getRemoteHostname());
+                    responseObj.put("port", Settings.getRemotePort());
+                    responseObj.put("type", "main");
+                    con.writeMsg(responseObj.toString());
+                    return true;
+                }
+                boolean redirectNeeded = false;
                 responseObj.put("command", "AUTHENTICATE_SUCCESS");
-                if (serverType == 0 && centralHostname == null) {
-                    centralHostname = con.getSocket().getInetAddress().getHostAddress();
-                    centralPort = con.getSocket().getPort();
-                    log.info(String.format("Backup server hostname: %s, port: %d", centralHostname, centralPort));
+                String host = (String) obj.get("hostname");
+                int port = ((Number) obj.get("port")).intValue();
+                if (serverType == 0 && Settings.getRemoteHostname() == null) {
+                    // this is a brand new backup server, need redirect sub-servers to it
+                    Settings.setRemoteHostname(host);
+                    Settings.setRemotePort(port);
+                    log.info(String.format("Backup server hostname: %s, port: %d", host, port));
                     connections.remove(con);
                     mainConnection = con;
                     responseObj.put("type", "backupserver");
                     JSONObject userInfoDup = new JSONObject();
                     userInfoDup.putAll(userInfo);
                     responseObj.put("userinfo", userInfoDup);
-                } else {
-                    Socket s = con.getSocket();
+                    // redirect sub-servers
+                    redirectNeeded = true;
+                }
+                else if (serverType == 0 && Settings.getRemoteHostname().equals(host) && Settings.getRemotePort() == port) {
+                    // this is the previous backup server
+                    connections.remove(con);
+                    mainConnection = con;
+                    responseObj.put("type", "backupserver");
+                    JSONObject userInfoDup = new JSONObject();
+                    userInfoDup.putAll(userInfo);
+                    responseObj.put("userinfo", userInfoDup);
+                }
+                else {
                     responseObj.put("type", "subserver");
-                    responseObj.put("pairedhost", s.getInetAddress().getHostAddress());
-                    responseObj.put("pairedport", s.getPort());
+                    responseObj.put("pairedhost", Settings.getRemoteHostname());
+                    responseObj.put("pairedport", Settings.getRemotePort());
                 }
                 con.writeMsg(responseObj.toString());
+                if (redirectNeeded) {
+                    log.info("a new backup server connected, let sub-servers connect to it");
+                    for (Connection c : connections) {
+                        if (c.getType() == 1) {
+                            JSONObject outObj = new JSONObject();
+                            outObj.put("command", "SERVER_REDIRECT");
+                            outObj.put("hostname", Settings.getRemoteHostname());
+                            outObj.put("port", Settings.getRemotePort());
+                            outObj.put("type", "backup");
+                            JSONObject msgInfo = new JSONObject();
+                            msgInfo.put("type", "SERVER_REDIRECT");
+                            msgInfo.put("message", outObj);
+                            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                        }
+                    }
+                }
             }
-            try {
-                int interval = ((Number) obj.get("interval")).intValue();
-                con.getSocket().setSoTimeout(interval * 2);
-            } catch (SocketException e) {
-                log.error("failed to set socket timeout" + e);
-            }
+            con.setAuthenticated(true);
             return false;
         }
     }
 
     /**
-     * Process SERVER_ANNOUNCE request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process SERVER_ANNOUNCE request. Modified in project 2
      */
     private boolean serverAnnounce(Connection con, JSONObject obj) {
         if (con.getType() != 1) {
@@ -321,36 +631,64 @@ public class Control extends Thread {
             log.error("some fields are missing");
             invalidMessage(con, "some fields are missing");
         }
-        // update values in serverInfo map
-        ServerInfo si = serverInfo.getOrDefault(id, new ServerInfo(id, hostname, port.intValue(), serverLoad.intValue(), clientLoad.intValue()));
-        if (!si.hostname.equals(hostname) || !(si.port == port.intValue())) {
-            log.error("new information does not match with old one");
-            invalidMessage(con, "Server hostname/port is changed");
-            return true;
+        // check if this announce comes from another central server
+        if (con.equals(mainConnection)) {
+            centralSI = new ServerInfo(id, hostname, port.intValue(), serverLoad.intValue(), clientLoad.intValue());
         }
-        si.serverLoad = serverLoad.intValue();
-        si.clientLoad = clientLoad.intValue();
-        serverInfo.put(id, si);
+        else {
+            // update values in serverInfo map
+            ServerInfo si = serverInfo.getOrDefault(con.getSocketId(), new ServerInfo(id, hostname, port.intValue(), serverLoad.intValue(), clientLoad.intValue()));
+            if (!si.hostname.equals(hostname) || !(si.port == port.intValue())) {
+                log.error("new information does not match with old one");
+                invalidMessage(con, "Server hostname/port is changed");
+                return true;
+            }
+            si.serverLoad = serverLoad.intValue();
+            si.clientLoad = clientLoad.intValue();
+            serverInfo.put(con.getSocketId(), si);
+        }
         return false;
     }
 
     /**
-     * Process ACTIVITY_BROADCAST request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process ACTIVITY_BROADCAST request. Modified in project 2
      */
     private boolean activityBroadcast(Connection con, JSONObject obj) {
         if (con.getType() != 1) {
             log.error("received ACTIVITY_BROADCAST from a non-server party");
-            invalidMessage(con, "received SERVER_ANNOUNCE from an unauthenticated server");
+            invalidMessage(con, "received ACTIVITY_BROADCAST from an unauthenticated server");
             return true;
+        }
+        // check if this message is processed before
+        String key = obj.toString();
+        JSONObject prevAnswer = messageHistory.get(key);
+        if (prevAnswer != null) {
+            instantMsgQueueMap.get(con.getSocketId()).offer(prevAnswer);
+            return false;
         }
         // broadcast to all connection, including servers and clients except source, if the message is correct
         for (Connection c : connections) {
             if (c.equals(con)) continue;
-            c.writeMsg(obj.toString());
+            if (c.getType() == 1) {
+                // use message queue system for server
+                JSONObject msgInfo = new JSONObject();
+                msgInfo.put("type", "ACTIVITY_BROADCAST");
+                msgInfo.put("message", obj);
+                instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+            }
+            else {
+                // simply send to client
+                c.writeMsg(obj.toString());
+            }
         }
+        // put the receipt into history and send receipt back
+        JSONObject responseObj = new JSONObject();
+        responseObj.put("command", "ACTIVITY_RECEIPT");
+        responseObj.put("activity", obj);
+        JSONObject msgInfo = new JSONObject();
+        msgInfo.put("type", "ACTIVITY_RECEIPT");
+        instantMsgQueueMap.get(con.getSocketId()).offer(msgInfo);
+        messageHistory.put(key, msgInfo);
         return false;
     }
 
@@ -366,12 +704,12 @@ public class Control extends Thread {
      */
     private int userVerify(String username, String secret) {
         if (username == null) {
-            log.error("received message does not contain a username");
+            log.info("received message does not contain a username");
             return 1;
         }
         if (username.equals("anonymous")) return 0;
         if (secret == null) {
-            log.error("received message does not contain a secret");
+            log.info("received message does not contain a secret");
             return 2;
         }
         if (!userInfo.containsKey(username)) return 3;
@@ -380,10 +718,7 @@ public class Control extends Thread {
     }
 
     /**
-     * Process LOCK_REQUEST request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process LOCK_REQUEST request. Modified in project 2
      */
     private boolean lockRequest(Connection con, JSONObject obj) {
 	    if (con.getType() != 1) {
@@ -416,14 +751,17 @@ public class Control extends Thread {
                 con.writeMsg(responseObj.toString());
                 return false;
         }
-        // Store user's information regardless the result of lock request.
-        userInfo.put(username, secret);
+        if (serverType != 2) {
+            // Store user's information in central servers regardless the result of lock request.
+            userInfo.put(username, secret);
+        }
+        JSONObject msgInfo = new JSONObject();
 	    // if this request is from a central server, simply response, otherwise lock request to another central server
         if (con.equals(mainConnection)) {
             responseObj.put("command", "LOCK_ALLOWED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
-            con.writeMsg(responseObj.toString());
+            msgInfo.put("type", "LOCK_ALLOWED");
         }
         else {
             // Send lock request to main server
@@ -431,17 +769,16 @@ public class Control extends Thread {
             requestObj.put("command", "LOCK_REQUEST");
             requestObj.put("username", username);
             requestObj.put("secret", secret);
-            mainConnection.writeMsg(requestObj.toString());
-            connectionMap.put(username, con);
+            msgInfo.put("type", "LOCK_REQUEST");
+            registerMap.put(username, con);
         }
+        msgInfo.put("message", responseObj);
+        instantMsgQueueMap.get("main_connection").offer(msgInfo);
 	    return false;
     }
 
     /**
-     * Process LOCK_ALLOWED request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process LOCK_ALLOWED request. Modified in project 2
      */
     private boolean lockAllowed(Connection con, JSONObject obj) {
 	    if (con.getType() != 1) {
@@ -466,26 +803,27 @@ public class Control extends Thread {
                 invalidMessage(con, "the message must contain non-null key secret");
                 return true;
         }
-        Connection c = connectionMap.remove(username);
+        Connection c = registerMap.remove(username);
+        JSONObject msgInfo = new JSONObject();
         // Send lock allowed to server, and register success to client.
         if (c.getType() == 1) {
             responseObj.put("command", "LOCK_ALLOWED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
+            msgInfo.put("type", "LOCK_ALLOWED");
+            msgInfo.put("message", responseObj);
+            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
         }
         else {
             responseObj.put("command", "REGISTER_SUCCESS");
             responseObj.put("info", String.format("register success for %s", username));
+            c.writeMsg(responseObj.toString());
         }
-        c.writeMsg(responseObj.toString());
 	    return false;
     }
 
     /**
-     * Process LOCK_DENIED request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process LOCK_DENIED request. Modified in project 2
      */
     private boolean lockDenied(Connection con, JSONObject obj) {
 	    if (con.getType() != 1) {
@@ -510,26 +848,32 @@ public class Control extends Thread {
                 invalidMessage(con, "the message must contain non-null key secret");
                 return true;
         }
-        Connection c = connectionMap.remove(username);
+        if (serverType != 2) {
+            // remove userinfo in local database of central servers
+            userInfo.remove(username);
+        }
+        Connection c = registerMap.remove(username);
+        JSONObject msgInfo = new JSONObject();
         // Send lock denied to server, and register failed to client.
         if (c.getType() == 1) {
             responseObj.put("command", "LOCK_DENIED");
             responseObj.put("username", username);
             responseObj.put("secret", secret);
+            msgInfo.put("type", "LOCK_DENIED");
+            msgInfo.put("message", responseObj);
+            instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
         }
         else {
             responseObj.put("command", "REGISTER_FAILED");
             responseObj.put("info", String.format("%s is already registered with the system", username));
+            c.writeMsg(responseObj.toString());
+            c.setTerm(true);
         }
-        if (c.getType() == 2) c.closeCon();
-	    return false;
+        return false;
     }
 
     /**
      * Process REGISTER request. Modified in project 2.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
      */
     private boolean register(Connection con, JSONObject obj) {
 	    if (con.getType() == 1) {
@@ -544,115 +888,146 @@ public class Control extends Thread {
         JSONObject responseObj = new JSONObject();
 	    String username = (String) obj.get("username");
         String secret = (String) obj.get("secret");
-        if (serverType != 2) {
-            int verify = userVerify(username, secret);
-            switch (verify) {
-                case 1:
-                    invalidMessage(con, "the message must contain non-null key username");
-                    return true;
-                case 2:
-                    invalidMessage(con, "the message must contain non-null key secret");
-                    return true;
-                case 0:
-                case 4:
-                    log.error("username is already registered");
-                    responseObj.put("command", "REGISTER_FAILED");
-                    responseObj.put("info", String.format("%s is already registered with the system", username));
-                    con.writeMsg(responseObj.toString());
-                    return true;
-            }
-            // Store user's information regardless the result of lock request.
-            userInfo.put(username, secret);
-        }
-        // Send lock request to main server
-        if (mainConnection != null) {
-            JSONObject requestObj = new JSONObject();
-            requestObj.put("command", "LOCK_REQUEST");
-            requestObj.put("username", username);
-            requestObj.put("secret", secret);
-            mainConnection.writeMsg(requestObj.toString());
-            connectionMap.put(username, con);
-        }
-        else {
-            responseObj.put("command", "REGISTER_SUCCESS");
-            responseObj.put("info", String.format("register success for %s", username));
-            con.writeMsg(responseObj.toString());
-        }
-        return false;
-    }
-
-    /**
-     * Process LOGIN request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
-     */
-    private boolean login(Connection con, JSONObject obj) {
-		if (con.getType() == 1) {
-			log.error("received LOGIN from a server");
-			invalidMessage(con, "Server should not send LOGIN request");
-			return true;
-		}
-		if (con.getType() == 0) con.setType(2);
-        JSONObject responseObj = new JSONObject();
-		String username = (String) obj.get("username");
-		String secret = (String) obj.get("secret");
-		int verify = userVerify(username, secret);
-		switch (verify) {
-            case 0: break;
+        int verify = userVerify(username, secret);
+        switch (verify) {
             case 1:
                 invalidMessage(con, "the message must contain non-null key username");
                 return true;
             case 2:
                 invalidMessage(con, "the message must contain non-null key secret");
                 return true;
-            case 3:
-                log.error("username is not found in database");
-                responseObj.put("command", "LOGIN_FAILED");
-                responseObj.put("info", String.format("user %s is not registered", username));
-                con.writeMsg(responseObj.toString());
-                return true;
+            case 0:
             case 4:
-                log.error("username and secret do not match");
-                responseObj.put("command", "LOGIN_FAILED");
-                responseObj.put("info", String.format("the supplied secret is incorrect: %s", secret));
+                log.error("username is already registered");
+                responseObj.put("command", "REGISTER_FAILED");
+                responseObj.put("info", String.format("%s is already registered with the system", username));
                 con.writeMsg(responseObj.toString());
                 return true;
         }
-        // login allowed
-        responseObj.put("command", "LOGIN_SUCCESS");
-        responseObj.put("info", String.format("logged in as user %s", username));
-        con.writeMsg(responseObj.toString());
-        // check other servers' load and redirect
-        for (ServerInfo si : serverInfo.values()) {
-            int clientLoad = si.clientLoad;
-            if (clientLoad <= connections.size() - 2) {
-                responseObj.clear();
-                responseObj.put("command", "REDIRECT");
-                responseObj.put("hostname", si.hostname);
-                responseObj.put("port", si.port);
+        if (serverType != 2) {
+            // Store user's information regardless the result of lock request.
+            userInfo.put(username, secret);
+            if (Settings.getRemoteHostname() == null) { // no other central server
+                responseObj.put("command", "REGISTER_SUCCESS");
+                responseObj.put("info", String.format("register success for %s", username));
+                con.writeMsg(responseObj.toString());
+            }
+        }
+        // Send lock request to main server
+        JSONObject requestObj = new JSONObject();
+        requestObj.put("command", "LOCK_REQUEST");
+        requestObj.put("username", username);
+        requestObj.put("secret", secret);
+        JSONObject msgInfo = new JSONObject();
+        msgInfo.put("type", "LOCK_REQUEST");
+        msgInfo.put("message", requestObj);
+        instantMsgQueueMap.get("main_connection").offer(msgInfo);
+        registerMap.put(username, con);
+        return false;
+    }
+
+    /**
+     * Process LOGIN request. Modified in project 2
+     */
+    private boolean login(Connection con, JSONObject obj) {
+		if (con.getType() == 1) {
+			log.info("received LOGIN from a server");
+			invalidMessage(con, "Server should not send LOGIN request");
+			return true;
+		}
+		if (con.getType() == 0) {
+		    con.setType(2);
+		    clientload++;
+        }
+        JSONObject responseObj = new JSONObject();
+		String username = (String) obj.get("username");
+		String secret = (String) obj.get("secret");
+		int verify = userVerify(username, secret);
+        switch (verify) {
+            case 1:
+                invalidMessage(con, "the message must contain non-null key username");
+                return true;
+            case 2:
+                invalidMessage(con, "the message must contain non-null key secret");
+                return true;
+        }
+		if (serverType == 2) {
+            // send login request to main server
+            log.debug("login request for user " + username);
+            JSONObject requestObj = new JSONObject();
+            requestObj.put("command", "LOGIN_REQUEST");
+            requestObj.put("username", username);
+            requestObj.put("secret", secret);
+            requestObj.put("key", con.getSocketId());
+            JSONObject msgInfo = new JSONObject();
+            msgInfo.put("type", "LOGIN_REQUEST");
+            msgInfo.put("message", requestObj);
+            instantMsgQueueMap.get("main_connection").offer(msgInfo);
+            loginMap.put(username + con.getSocketId(), con);
+            return false;
+        }
+        else {
+            switch (verify) {
+                case 3:
+                    log.error("username is not found in database");
+                    responseObj.put("command", "LOGIN_FAILED");
+                    responseObj.put("info", String.format("user %s is not registered", username));
+                    con.writeMsg(responseObj.toString());
+                    return true;
+                case 4:
+                    log.error("username and secret do not match");
+                    responseObj.put("command", "LOGIN_FAILED");
+                    responseObj.put("info", String.format("the supplied secret is incorrect: %s", secret));
+                    con.writeMsg(responseObj.toString());
+                    return true;
+            }
+            // login allowed
+            log.debug("login allowed for user " + username);
+            responseObj.put("command", "LOGIN_SUCCESS");
+            responseObj.put("info", String.format("logged in as user %s", username));
+            con.writeMsg(responseObj.toString());
+            // check other servers' load and redirect
+            String minHostname = null;
+            int minPort = 0;
+            int min = Integer.MAX_VALUE;
+            for (ServerInfo si : serverInfo.values()) {
+                if (si.clientLoad < min) {
+                    minHostname = si.hostname;
+                    minPort = si.port;
+                    min = si.clientLoad;
+                }
+            }
+            responseObj.clear();
+            responseObj.put("command", "REDIRECT");
+            if (centralSI.clientLoad < clientload + 2 && centralSI.clientLoad * 4 < min) {
+                // redirect to another central server
+                responseObj.put("hostname", Settings.getRemoteHostname());
+                responseObj.put("port", Settings.getRemotePort());
                 con.writeMsg(responseObj.toString());
                 return true;
             }
+            else if (min < clientload * 4 && minHostname != null && minPort != 0) {
+                // redirect to sub-server
+                responseObj.put("hostname", minHostname);
+                responseObj.put("port", minPort);
+                con.writeMsg(responseObj.toString());
+                return true;
+            }
+            con.setAuthenticated(true);
         }
-        // set login flag
-        con.setLogin(true);
         return false;
 	}
 
     /**
-     * Process ACTIVITY_MESSAGE request.
-     * @param con source connection,
-     * @param obj JSON object of message.
-     * @return true if connection should be closed.
+     * Process ACTIVITY_MESSAGE request. Modified in project 2
      */
 	private boolean activityMessage(Connection con, JSONObject obj) {
-        JSONObject responseObj = new JSONObject();
 	    if (con.getType() != 2) {
 	        log.error("received ACTIVITY_MESSAGE from a non-client party");
 	        invalidMessage(con, "Non-client should not send ACTIVITY_MESSAGE");
 	        return true;
         }
+        JSONObject responseObj = new JSONObject();
         String username = (String) obj.get("username");
 	    String secret = (String) obj.get("secret");
 	    JSONObject activity = (JSONObject) obj.get("activity");
@@ -674,7 +1049,7 @@ public class Control extends Thread {
                 return true;
         }
         // check if this user logged in
-        if (!con.getLogin()) {
+        if (!con.isAuthenticated()) {
             log.error("user has not logged in");
             responseObj.put("command", "AUTHENTICATION_FAIL");
             responseObj.put("info", "must send a LOGIN message first");
@@ -685,8 +1060,21 @@ public class Control extends Thread {
         activity.put("authenticated_user", username);
         responseObj.put("command", "ACTIVITY_BROADCAST");
         responseObj.put("activity", activity);
+        // get current system time and put it in message
+        String time = Long.toString(System.currentTimeMillis());
+        responseObj.put("time", time);
         for (Connection c : connections) {
-            c.writeMsg(responseObj.toString());
+            if (c.getType() == 1) {
+                // use message queue system for server
+                JSONObject msgInfo = new JSONObject();
+                msgInfo.put("type", "ACTIVITY_BROADCAST");
+                msgInfo.put("message", responseObj);
+                instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+            }
+            else {
+                // simply send to client
+                c.writeMsg(responseObj.toString());
+            }
         }
 	    return false;
     }
@@ -694,30 +1082,39 @@ public class Control extends Thread {
 	/*
 	 * The connection has been closed by the other party.
 	 */
-	public synchronized void connectionClosed(Connection con) {
+	public synchronized void connectionClosed(Connection con, boolean partition) {
 		if (term) return;
 		if (con.equals(mainConnection)) {
             mainConnection = null;
-		    if (serverType == 1) serverType = 0;
-		    else if (serverType == 2) {
-		        if (backupConnection == null) {
-		            // no central server is available, this sub-server is useless
-                    log.fatal("no central server is available, entire system is unrecoverable");
-                    Control.getInstance().setTerm(true);
+            centralSI = null;
+            if (serverType == 1 && !partition) {
+                serverType = 0;
+                Settings.setRemoteHostname(null);
+                Settings.setRemotePort(0);
+            }
+            if (serverType == 2) {
+                if (backupConnection == null) {
+                    log.error("no central server is connected, keep pinging main server");
                 }
-                else {
-                    mainConnection = backupConnection;
-                    backupConnection = null;
-                }
+                mainConnection = backupConnection;
+                mainConnection.setMainConnection(true);
+                String tempHostname = Settings.getRemoteHostname();
+                int tempport = Settings.getRemotePort();
+                Settings.setRemoteHostname(backupHostname);
+                Settings.setRemotePort(backupPort);
+                backupConnection = null;
+                backupHostname = tempHostname;
+                backupPort = tempport;
             }
         }
         else if (con.equals(backupConnection)) {
             backupConnection = null;
         }
         else {
-            connections.remove(con);
-            if (con.getType() == 2) clientload--;
-            else if (con.getType() == 1) serverload--;
+		    connections.remove(con);
+		    serverInfo.remove(con.getSocketId());
+            if (con.getType() == 1) serverload--;
+            else clientload--;
         }
 	}
 	
@@ -727,6 +1124,8 @@ public class Control extends Thread {
 	public synchronized Connection incomingConnection(Socket s) throws IOException {
 		log.debug("incoming connection: " + Settings.socketAddress(s));
 		Connection c = new Connection(s);
+		instantMsgQueueMap.put(Settings.socketAddress(s), new LinkedList<>());
+        verifyMsgQueueMap.put(Settings.socketAddress(s), new ArrayList<>());
 		connections.add(c);
 		return c;
 	}
@@ -737,9 +1136,36 @@ public class Control extends Thread {
 	public synchronized Connection outgoingConnection(Socket s) throws IOException{
 		log.debug("outgoing connection: " + Settings.socketAddress(s));
 		Connection c = new Connection(s);
+        instantMsgQueueMap.put(Settings.socketAddress(s), new LinkedList<>());
+        verifyMsgQueueMap.put(Settings.socketAddress(s), new ArrayList<>());
 		c.setType(1);
 		return c;
 	}
+
+    /**
+     * Poll the first element of the instant message queue if found by given socket id
+     */
+    public JSONObject getInstantMessage(String key) {
+        Queue q = instantMsgQueueMap.get(key);
+        return q == null ? null : ((JSONObject) q.poll());
+    }
+
+    /**
+     * Get the entire verify message list associates to given socket id
+     */
+    public ArrayList<JSONObject> getVerifyMsgList(String key) {
+        return verifyMsgQueueMap.get(key);
+    }
+
+    /**
+     * Enqueue
+     */
+    public boolean addVerifyMsg(String key, JSONObject msgInfo) {
+        ArrayList l = verifyMsgQueueMap.get(key);
+        if (l == null) return false;
+        l.add(msgInfo);
+        return true;
+    }
 
     /**
      * Whether this server is ready to work
@@ -761,7 +1187,6 @@ public class Control extends Thread {
 				break;
 			}
 			if (!term) {
-				log.debug("doing activity");
 				term = doActivity();
 			}
 		}
@@ -798,10 +1223,71 @@ public class Control extends Thread {
 	    outObj.put("clientload", clientload);
 	    outObj.put("hostname", Settings.getLocalHostname());
 	    outObj.put("port", Settings.getLocalPort());
-	    if (mainConnection != null)
-	        mainConnection.writeMsg(outObj.toString());
-	    if (serverType == 2 && backupConnection != null)
-            backupConnection.writeMsg(outObj.toString());
+	    log.debug(String.format("server load: %d, client load: %d", serverload, clientload));
+	    if (serverType != 0 && mainConnection == null && Settings.getRemoteHostname() != null) {
+            // this server should connect to a main server but it does not
+            // Alpha central server does not ping others
+            log.debug("trying to establish a connection with main server");
+            // then try to establish a connection using given parameters
+            try {
+                mainConnection = outgoingConnection(new Socket(Settings.getRemoteHostname(), Settings.getRemotePort()));
+                mainConnection.setMainConnection(true);
+                // Send authentication to remote host
+                JSONObject requestObj = new JSONObject();
+                requestObj.put("command", "AUTHENTICATE");
+                requestObj.put("secret", Settings.getSecret());
+                requestObj.put("hostname", Settings.getLocalHostname());
+                requestObj.put("port", Settings.getLocalPort());
+                requestObj.put("type", "main");
+                mainConnection.writeMsg(requestObj.toString());
+            } catch (IOException e) {
+                mainConnection = null;
+                log.error("failed to setup main server, retry in 5 seconds");
+            }
+        }
+        if (backupConnection == null && backupHostname != null) {
+            // this server should connect to a backup server but it does not
+            log.debug("trying to establish a connection with backup server");
+            // then try to establish a connection using given parameters
+            try {
+                backupConnection = outgoingConnection(new Socket(backupHostname, backupPort));
+                backupConnection.setMainConnection(false);
+                // Send authentication to remote host
+                JSONObject requestObj = new JSONObject();
+                requestObj.put("command", "AUTHENTICATE");
+                requestObj.put("secret", Settings.getSecret());
+                requestObj.put("hostname", Settings.getLocalHostname());
+                requestObj.put("port", Settings.getLocalPort());
+                requestObj.put("type", "backup");
+                mainConnection.writeMsg(requestObj.toString());
+            } catch (IOException e) {
+                mainConnection = null;
+                log.error("failed to setup backup server, retry in 5 seconds");
+            }
+        }
+        JSONObject msgInfo = new JSONObject();
+	    msgInfo.put("type", "SERVER_ANNOUNCE");
+	    msgInfo.put("message", outObj);
+	    if (mainConnection != null) {
+	        instantMsgQueueMap.get(mainConnection.getSocketId()).offer(msgInfo);
+        }
+	    if (serverType == 2 && backupConnection != null) {
+            instantMsgQueueMap.get(backupConnection.getSocketId()).offer(msgInfo);
+        }
+        // central servers announce to sub-servers that they are still alive
+        // used to pass timeout check
+        if (serverType == 0 || serverType == 1) {
+            outObj.clear();
+            msgInfo.clear();
+            outObj.put("command", "STILL_ALIVE");
+            msgInfo.put("type", "STILL_ALIVE");
+            msgInfo.put("message", outObj);
+            for (Connection c : connections) {
+                if (c.getType() == 1) {
+                    instantMsgQueueMap.get(c.getSocketId()).offer(msgInfo);
+                }
+            }
+        }
 		return false;
 	}
 	

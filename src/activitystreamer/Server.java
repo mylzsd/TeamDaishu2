@@ -97,8 +97,8 @@ public class Server {
 		if (cmd.hasOption("s")) {
 			Settings.setSecret(cmd.getOptionValue("s"));
 		}
-		else {
-		    // generate a secret if not specified
+		if (Settings.getSecret() == null) {
+		    // generate a secret if not exist
             String secret = Settings.nextSecret();
             System.out.format("secret for this server is: %s\n", secret);
 			Settings.setSecret(secret);

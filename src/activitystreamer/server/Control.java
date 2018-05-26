@@ -80,6 +80,7 @@ public class Control extends Thread {
         registerMap = new HashMap<>();
         loginMap = new HashMap<>();
         verifyMsgQueueMap = new HashMap<>();
+        verifyMsgQueueMap.put("main_connection", new ArrayList<>());
         messageHistory = new HashMap<>();
         if (Settings.getRemoteHostname() == null) serverType = 0;
 		// start a listener
@@ -467,6 +468,10 @@ public class Control extends Thread {
             invalidMessage(con, "received REDIRECT from an unauthorized server");
             return true;
         }
+        String hostname = (String) obj.get("hostname");
+        int port = ((Number) obj.get("port")).intValue();
+        // if redirect to itself, simply ignore
+        if (hostname.equals(Settings.getLocalHostname()) && port == Settings.getLocalPort()) return false;
         JSONObject responseObj = new JSONObject();
         String username = (String) obj.get("username");
         String key = (String) obj.get("key");
@@ -487,11 +492,11 @@ public class Control extends Thread {
             invalidMessage(con, "received ACTIVITY_RECEIPT from an unauthenticated server");
             return true;
         }
-        String confirmed = obj.get("message").toString();
+        String confirmed = obj.get("activity").toString();
         String key = con.equals(mainConnection) ? "main_connection" : con.getSocketId();
         List<JSONObject> vList = verifyMsgQueueMap.get(key);
         for (int i = 0; i < vList.size(); i++) {
-            String awaiting = vList.get(i).get("message").toString();
+            String awaiting = vList.get(i).get("activity").toString();
             // remove activity message if it is confirmed to be received
             if (confirmed.equals(awaiting)) {
                 vList.remove(i);

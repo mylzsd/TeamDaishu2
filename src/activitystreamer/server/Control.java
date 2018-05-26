@@ -185,7 +185,7 @@ public class Control extends Thread {
                     Settings.setRemoteHostname(null);
                     Settings.setRemotePort(0);
                 }
-                else if (con.equals(backupConnection)) {
+                if (con.equals(backupConnection)) {
                     backupHostname = null;
                     backupPort = 0;
                 }
@@ -540,7 +540,6 @@ public class Control extends Thread {
                     con.writeMsg(responseObj.toString());
                     return true;
                 }
-                serverload++;
                 boolean redirectNeeded = false;
                 responseObj.put("command", "AUTHENTICATE_SUCCESS");
                 String host = (String) obj.get("hostname");
@@ -590,6 +589,7 @@ public class Control extends Thread {
                     }
                 }
             }
+            serverload++;
             con.setAuthenticated(true);
             return false;
         }
@@ -1061,7 +1061,13 @@ public class Control extends Thread {
             }
             if (serverType == 2) {
                 if (backupConnection == null) {
-                    log.error("no central server is connected, keep pinging main server");
+                    if (Settings.getRemoteHostname() == null && backupHostname == null) {
+                        log.fatal("both central servers quit, this server should also quit");
+                        System.exit(0);
+                    }
+                    else {
+                        log.error("no central server is connected, keep pinging main server");
+                    }
                 }
                 mainConnection = backupConnection;
                 mainConnection.setMainConnection(true);

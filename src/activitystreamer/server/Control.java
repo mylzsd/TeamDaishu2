@@ -366,13 +366,13 @@ public class Control extends Thread {
         responseObj.put("command", "REDIRECT");
         responseObj.put("username", username);
         responseObj.put("key", obj.get("key"));
-        if (centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
+        if (centralSI.clientLoad < clientload - 3 && (centralSI.clientLoad + 1) * 4 < min) {
             // redirect to another central server
             responseObj.put("hostname", Settings.getRemoteHostname());
             responseObj.put("port", Settings.getRemotePort());
             con.writeMsg(responseObj.toString());
         }
-        else if (min < clientload * 4 && minHostname != null && minPort != 0) {
+        else if (min < (clientload + 1) * 4 && minHostname != null && minPort != 0) {
             if (sourceSI.clientLoad > min + 2) {
                 // redirect to sub-server
                 responseObj.put("hostname", minHostname);
@@ -986,14 +986,14 @@ public class Control extends Thread {
             }
             responseObj.clear();
             responseObj.put("command", "REDIRECT");
-            if (centralSI != null && centralSI.clientLoad < clientload - 3 && centralSI.clientLoad * 4 < min) {
+            if (centralSI != null && centralSI.clientLoad < clientload - 3 && (centralSI.clientLoad + 1) * 4 < min) {
                 // redirect to another central server
                 responseObj.put("hostname", Settings.getRemoteHostname());
                 responseObj.put("port", Settings.getRemotePort());
                 con.writeMsg(responseObj.toString());
                 return true;
             }
-            else if (min < clientload * 4 && minHostname != null && minPort != 0) {
+            else if (min < (clientload + 1) * 4 && minHostname != null && minPort != 0) {
                 // redirect to sub-server
                 responseObj.put("hostname", minHostname);
                 responseObj.put("port", minPort);

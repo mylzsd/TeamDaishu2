@@ -360,8 +360,7 @@ public class Control extends Thread {
                 min = si.clientLoad;
             }
         }
-        String hostname = (String) obj.get("hostname");
-        int port = ((Number) obj.get("port")).intValue();
+        ServerInfo sourceSI = serverInfo.get(con.getSocketId());
         responseObj.clear();
         responseObj.put("command", "REDIRECT");
         responseObj.put("username", username);
@@ -373,7 +372,7 @@ public class Control extends Thread {
             con.writeMsg(responseObj.toString());
         }
         else if (min < clientload * 4 && minHostname != null && minPort != 0) {
-            if (!minHostname.equals(hostname) || minPort != port) {
+            if (sourceSI.clientLoad > min + 2) {
                 // redirect to sub-server
                 responseObj.put("hostname", minHostname);
                 responseObj.put("port", minPort);
@@ -665,11 +664,16 @@ public class Control extends Thread {
         for (Connection c : connections) {
             if (c.equals(con)) continue;
             if (c.getType() == 1) {
-                // use message verify system for server;
-                verifyMsgQueueMap.get(c.getSocketId()).add(obj);
+                if (!con.equals(mainConnection)) {
+                    // use message verify system for server;
+                    verifyMsgQueueMap.get(c.getSocketId()).add(obj);
+                    c.writeMsg(obj.toString());
+                }
             }
-            // simply send to client
-            c.writeMsg(obj.toString());
+            else {
+                // simply send to client
+                c.writeMsg(obj.toString());
+            }
         }
         // put the receipt into history and send receipt back
         JSONObject responseObj = new JSONObject();
@@ -1041,7 +1045,7 @@ public class Control extends Thread {
         // get current system time and put it in message
         String time = Long.toString(System.currentTimeMillis());
         responseObj.put("time", time);
-        if (serverType == 2 && mainConnection != null) {
+        if (mainConnection != null) {
             mainConnection.writeMsg(responseObj.toString());
             verifyMsgQueueMap.get("main_connection").add(responseObj);
         }
